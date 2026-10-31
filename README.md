@@ -92,4 +92,4 @@ To ensure maximum uptime and zero regressions in production:
 **Osama Khalil**
 - **Role:** DevOps Engineer | Microsoft Azure | Terraform | CI/CD | Linux
 - **GitHub:** [@khalilosam](https://github.com/khalilosam)
-- **LinkedIn:** [linkedin.com/in/osamakhalil](https://linkedin.com)
+- **LinkedIn:** [linkedin.com/in/osama-khalil-20525227](https://www.linkedin.com/in/osama-khalil-20525227/)
