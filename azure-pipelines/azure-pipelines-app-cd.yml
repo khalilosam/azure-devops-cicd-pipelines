@@ -1,0 +1,101 @@
+# ==============================================================================
+# Azure DevOps CD Release Pipeline: Telecom NMS Multi-Environment Deployment
+# Deploys application packages to Dev, Staging, and Production Azure Linux VMs
+# Uses Environment Gates, Service Connections, and Post-Deploy Verification
+# ==============================================================================
+
+trigger: none
+
+resources:
+  pipelines:
+    - pipeline: ci-build
+      source: 'telecom-nms-ci'
+      trigger:
+        branches:
+          include:
+            - main
+
+variables:
+  - name: azureSubscription
+    value: 'sc-azure-telecom-prod'
+  - name: appName
+    value: 'telecom-nms'
+
+stages:
+  # ----------------------------------------------------------------------------
+  # ENVIRONMENT: Development
+  # ----------------------------------------------------------------------------
+  - stage: Deploy_Dev
+    displayName: 'Deploy to Development Environment'
+    jobs:
+      - deployment: Deploy_VM_Dev
+        displayName: 'Deploy NMS Backend to Dev VM'
+        pool:
+          vmImage: 'ubuntu-latest'
+        environment: 'telecom-nms-dev'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - download: ci-build
+                  artifact: drop
+                  displayName: 'Download CI Build Artifact'
+
+                - task: AzureCLI@2
+                  inputs:
+                    azureSubscription: $(azureSubscription)
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      echo "##[section]Executing remote rollout on Azure Dev Linux VM..."
+                      az vm run-command invoke \
+                        --resource-group rg-telecom-dev \
+                        --name vm-nms-dev \
+                        --command-id RunShellScript \
+                        --scripts "echo 'Deploying artifact drop...'; systemctl restart nms-api"
+                  displayName: 'Run Deployment Script via Azure VM Run-Command'
+
+                - script: |
+                    chmod +x scripts/smoke_test.sh
+                    ./scripts/smoke_test.sh --target "http://dev-nms.internal.telecom.net" --expected-code 200
+                  displayName: 'Dev Environment Smoke Test'
+
+  # ----------------------------------------------------------------------------
+  # ENVIRONMENT: Production (Includes Approvals & Canary Health Gates)
+  # ----------------------------------------------------------------------------
+  - stage: Deploy_Prod
+    displayName: 'Deploy to Production Environment'
+    dependsOn: Deploy_Dev
+    condition: succeeded()
+    jobs:
+      - deployment: Deploy_VM_Prod
+        displayName: 'Zero-Downtime Rolling Deploy to Production VM'
+        pool:
+          vmImage: 'ubuntu-latest'
+        environment: 'telecom-nms-prod' # Configured with manual approval check
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - download: ci-build
+                  artifact: drop
+                  displayName: 'Download CI Release Artifact'
+
+                - task: AzureCLI@2
+                  inputs:
+                    azureSubscription: $(azureSubscription)
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      echo "##[section]Performing rolling upgrade on Azure Production VM..."
+                      az vm run-command invoke \
+                        --resource-group rg-telecom-prod \
+                        --name vm-nms-prod \
+                        --command-id RunShellScript \
+                        --scripts "systemctl reload nms-api || systemctl restart nms-api"
+                  displayName: 'Deploy Production Release'
+
+                - script: |
+                    chmod +x scripts/smoke_test.sh
+                    ./scripts/smoke_test.sh --target "https://nms.telecom.azure.com" --expected-code 200 --timeout 60
+                  displayName: 'Production Post-Deployment Health Check'

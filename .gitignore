@@ -1,0 +1,12 @@
+*.log
+*.tmp
+*.pyc
+__pycache__/
+.env
+.venv/
+.pytest_cache/
+.coverage
+*.binary
+tfplan*
+.terraform/
+.terraform.lock.hcl

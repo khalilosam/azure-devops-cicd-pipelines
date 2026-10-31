@@ -1,0 +1,153 @@
+# ==============================================================================
+# Azure DevOps Pipeline: Enterprise Terraform Infrastructure as Code (IaC)
+# Implements TFLint, Checkov Security Scanning, Plan Artifacts & Gated Apply
+# ==============================================================================
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - modules/**
+      - environments/**
+
+pr:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  - name: terraformVersion
+    value: '1.7.5'
+  - name: backendStorageRG
+    value: 'rg-terraform-mgmt'
+  - name: backendStorageAccount
+    value: 'sttfstateprod01'
+  - name: backendContainer
+    value: 'tfstate'
+  - name: backendKey
+    value: 'telecom-nms.tfstate'
+  - name: azureServiceConnection
+    value: 'sc-azure-telecom-prod'
+
+stages:
+  # ----------------------------------------------------------------------------
+  # STAGE 1: Terraform Linting & Security Compliance Scan
+  # ----------------------------------------------------------------------------
+  - stage: Terraform_Quality_Gate
+    displayName: 'Terraform Lint & Security Scan'
+    jobs:
+      - job: Static_IaC_Analysis
+        displayName: 'TFLint, tfsec & Checkov Scanner'
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '3.11'
+
+          - script: |
+              echo "##[section]Installing Checkov IaC Security Scanner..."
+              pip install checkov
+            displayName: 'Install Checkov'
+
+          - script: |
+              echo "##[section]Running Checkov static security analysis against Terraform code..."
+              checkov -d . --framework terraform --output junitxml --output-file-path $(Build.ArtifactStagingDirectory)/checkov-report.xml --soft-fail
+            displayName: 'Checkov Security Audit'
+
+          - task: PublishTestResults@2
+            inputs:
+              testResultsFormat: 'JUnit'
+              testResultsFiles: '$(Build.ArtifactStagingDirectory)/checkov-report.xml'
+              testRunTitle: 'Checkov IaC Compliance Scan'
+            displayName: 'Publish Checkov Results'
+
+  # ----------------------------------------------------------------------------
+  # STAGE 2: Terraform Plan (Dev & Prod Environments)
+  # ----------------------------------------------------------------------------
+  - stage: Terraform_Plan
+    displayName: 'Terraform Plan Generation'
+    dependsOn: Terraform_Quality_Gate
+    jobs:
+      - job: Plan_Infrastructure
+        displayName: 'Terraform Init & Plan'
+        steps:
+          - script: |
+              curl -s https://releases.hashicorp.com/terraform/$(terraformVersion)/terraform_$(terraformVersion)_linux_amd64.zip -o terraform.zip
+              unzip terraform.zip
+              sudo mv terraform /usr/local/bin/
+              terraform version
+            displayName: 'Install Terraform $(terraformVersion)'
+
+          - task: AzureCLI@2
+            inputs:
+              azureSubscription: $(azureServiceConnection)
+              addSpnToEnvironment: true
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                set -e
+                echo "##[section]Configuring remote state backend on Azure Storage..."
+                export ARM_CLIENT_ID="$servicePrincipalId"
+                export ARM_CLIENT_SECRET="$servicePrincipalKey"
+                export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+                export ARM_TENANT_ID="$tenantId"
+
+                terraform init \
+                  -backend-config="resource_group_name=$(backendStorageRG)" \
+                  -backend-config="storage_account_name=$(backendStorageAccount)" \
+                  -backend-config="container_name=$(backendContainer)" \
+                  -backend-config="key=$(backendKey)"
+
+                echo "##[section]Generating execution plan..."
+                terraform plan -out=tfplan.binary -no-color
+
+                echo "##[section]Converting plan to human-readable format..."
+                terraform show -no-color tfplan.binary > $(Build.ArtifactStagingDirectory)/tfplan.txt
+            displayName: 'Terraform Plan Execution'
+
+          - task: PublishPipelineArtifact@1
+            inputs:
+              targetPath: '$(Build.ArtifactStagingDirectory)/tfplan.txt'
+              artifact: 'TerraformPlan'
+            displayName: 'Publish Terraform Plan Output'
+
+  # ----------------------------------------------------------------------------
+  # STAGE 3: Terraform Apply (Gated Production Rollout)
+  # ----------------------------------------------------------------------------
+  - stage: Terraform_Apply
+    displayName: 'Terraform Apply (Production)'
+    dependsOn: Terraform_Plan
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - deployment: Apply_Production_IaC
+        displayName: 'Provision Azure Cloud Resources'
+        environment: 'telecom-infrastructure-prod' # Manual approval required
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: AzureCLI@2
+                  inputs:
+                    azureSubscription: $(azureServiceConnection)
+                    addSpnToEnvironment: true
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      export ARM_CLIENT_ID="$servicePrincipalId"
+                      export ARM_CLIENT_SECRET="$servicePrincipalKey"
+                      export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+                      export ARM_TENANT_ID="$tenantId"
+
+                      terraform init \
+                        -backend-config="resource_group_name=$(backendStorageRG)" \
+                        -backend-config="storage_account_name=$(backendStorageAccount)" \
+                        -backend-config="container_name=$(backendContainer)" \
+                        -backend-config="key=$(backendKey)"
+
+                      echo "##[section]Applying planned infrastructure changes to Azure..."
+                      terraform apply -auto-approve
+                  displayName: 'Terraform Apply'

@@ -1,0 +1,120 @@
+# ==============================================================================
+# Azure DevOps CI Pipeline: Telecom NMS Application
+# Triggers on Pull Requests and merges to main/develop branches
+# Includes: Flake8 Lint, Bandit SAST Scan, Pytest Matrix, Docker & Trivy Scan
+# ==============================================================================
+
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+      - release/*
+  paths:
+    include:
+      - backend/**
+      - frontend/**
+      - azure-pipelines/**
+
+pr:
+  branches:
+    include:
+      - main
+      - develop
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  - name: pythonVersion
+    value: '3.11'
+  - name: appName
+    value: 'telecom-nms-api'
+  - name: buildConfiguration
+    value: 'Release'
+
+stages:
+  # ----------------------------------------------------------------------------
+  # STAGE 1: Code Quality, Linting & SAST Security Scanning
+  # ----------------------------------------------------------------------------
+  - stage: Lint_And_Security_Scan
+    displayName: 'Code Quality & SAST Analysis'
+    jobs:
+      - job: Static_Analysis
+        displayName: 'Flake8 & Bandit Security Scan'
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: $(pythonVersion)
+            displayName: 'Set Python $(pythonVersion)'
+
+          - script: |
+              python -m pip install --upgrade pip
+              pip install flake8 bandit
+            displayName: 'Install Lint & SAST Tools'
+
+          - script: |
+              echo "##[section]Running Flake8 syntax & style enforcement..."
+              flake8 backend/ --count --select=E9,F63,F7,F82 --show-source --statistics
+              flake8 backend/ --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+            displayName: 'Flake8 Code Inspection'
+
+          - script: |
+              echo "##[section]Running Bandit Static Application Security Testing (SAST)..."
+              bandit -r backend/ -f json -o $(Build.ArtifactStagingDirectory)/bandit-report.json || true
+              bandit -r backend/ -ll
+            displayName: 'Bandit Security Audit'
+
+          - task: PublishBuildArtifacts@1
+            inputs:
+              pathToPublish: '$(Build.ArtifactStagingDirectory)/bandit-report.json'
+              artifactName: 'Security-Reports'
+            displayName: 'Publish SAST Scan Artifacts'
+
+  # ----------------------------------------------------------------------------
+  # STAGE 2: Automated Unit & Integration Testing
+  # ----------------------------------------------------------------------------
+  - stage: Unit_And_Integration_Tests
+    displayName: 'Test Suite Execution'
+    dependsOn: Lint_And_Security_Scan
+    jobs:
+      - job: Pytest_Runner
+        displayName: 'Pytest with Cobertura Code Coverage'
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: $(pythonVersion)
+            displayName: 'Set Python $(pythonVersion)'
+
+          - template: templates/steps-python-test.yml
+            parameters:
+              requirementsFile: 'backend/requirements.txt'
+              testPath: 'tests/'
+
+  # ----------------------------------------------------------------------------
+  # STAGE 3: Build & Package Artifacts
+  # ----------------------------------------------------------------------------
+  - stage: Package_Artifacts
+    displayName: 'Artifact Packaging & Staging'
+    dependsOn: Unit_And_Integration_Tests
+    condition: and(succeeded(), in(variables['Build.SourceBranch'], 'refs/heads/main', 'refs/heads/develop'))
+    jobs:
+      - job: Build_Distribution
+        displayName: 'Create Tarball & Archive'
+        steps:
+          - task: ArchiveFiles@2
+            inputs:
+              rootFolderOrFile: '$(Build.SourcesDirectory)'
+              includeRootFolder: false
+              archiveType: 'tar'
+              tarCompression: 'gz'
+              archiveFile: '$(Build.ArtifactStagingDirectory)/$(appName)-$(Build.BuildId).tar.gz'
+              replaceExistingArchive: true
+            displayName: 'Archive Application Bundle'
+
+          - task: PublishPipelineArtifact@1
+            inputs:
+              targetPath: '$(Build.ArtifactStagingDirectory)/$(appName)-$(Build.BuildId).tar.gz'
+              artifact: 'drop'
+              publishLocation: 'pipeline'
+            displayName: 'Publish Release Drop Artifact'

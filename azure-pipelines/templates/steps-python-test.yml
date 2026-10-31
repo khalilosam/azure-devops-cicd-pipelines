@@ -1,0 +1,36 @@
+# Reusable Step Template for Python Testing and Code Coverage
+parameters:
+  - name: requirementsFile
+    type: string
+    default: 'backend/requirements.txt'
+  - name: testPath
+    type: string
+    default: 'tests/'
+
+steps:
+  - script: |
+      python -m pip install --upgrade pip
+      pip install pytest pytest-cov
+      if [ -f ${{ parameters.requirementsFile }} ]; then
+        pip install -r ${{ parameters.requirementsFile }}
+      fi
+    displayName: 'Install Dependencies & Pytest'
+
+  - script: |
+      python -m pytest ${{ parameters.testPath }} \
+        --junitxml=$(Build.ArtifactStagingDirectory)/test-results.xml \
+        --cov=backend \
+        --cov-report=xml:$(Build.ArtifactStagingDirectory)/coverage.xml \
+        --cov-report=term
+    displayName: 'Execute Pytest Suite with Coverage'
+
+  - task: PublishTestResults@2
+    inputs:
+      testResultsFiles: '$(Build.ArtifactStagingDirectory)/test-results.xml'
+      testRunTitle: 'Pytest Automated Test Results'
+    displayName: 'Publish JUnit Test Results'
+
+  - task: PublishCodeCoverageResults@2
+    inputs:
+      summaryFileLocation: '$(Build.ArtifactStagingDirectory)/coverage.xml'
+    displayName: 'Publish Cobertura Code Coverage'

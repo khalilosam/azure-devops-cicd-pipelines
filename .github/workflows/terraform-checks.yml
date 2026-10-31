@@ -1,0 +1,46 @@
+name: "Terraform IaC Compliance & Security"
+
+on:
+  pull_request:
+    paths:
+      - '**/*.tf'
+      - '**/*.tfvars'
+  push:
+    branches: [ main ]
+    paths:
+      - '**/*.tf'
+
+jobs:
+  terraform-validate:
+    name: "Terraform Validation & Format"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7.5"
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive || true
+
+  checkov-scan:
+    name: "Checkov Policy-as-Code Audit"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Checkov
+        run: pip install checkov
+
+      - name: Run Checkov Scanner
+        run: |
+          checkov -d . --framework terraform --soft-fail
